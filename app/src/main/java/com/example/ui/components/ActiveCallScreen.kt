@@ -122,7 +122,7 @@ fun ActiveCallScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = if (isVideoCall) "Videollamada cifrada de extremo a extremo" else "Llamada cifrada de extremo a extremo",
+                        text = if (isVideoCall) "Videollamada (Versión preliminar)" else "Llamada de voz (Versión preliminar)",
                         fontSize = 12.sp,
                         color = Color.White.copy(alpha = 0.6f),
                         fontWeight = FontWeight.Medium

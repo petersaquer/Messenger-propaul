@@ -68,6 +68,8 @@ import androidx.compose.ui.unit.sp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.ContactsContract
+import android.util.Log
 import com.example.data.model.Chat
 import com.example.data.model.ChatType
 import com.example.data.model.UserStatusGroup
@@ -224,6 +226,51 @@ fun ChatDetailScreen(
         }
     }
 
+    val contactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickContact()
+    ) { contactUri ->
+        if (contactUri != null) {
+            try {
+                val cursor = context.contentResolver.query(
+                    contactUri,
+                    arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME),
+                    null,
+                    null,
+                    null
+                )
+                var contactName = "Contacto"
+                var contactId: String? = null
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val nameIdx = it.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME)
+                        val idIdx = it.getColumnIndex(ContactsContract.Contacts._ID)
+                        if (nameIdx != -1) contactName = it.getString(nameIdx) ?: "Contacto"
+                        if (idIdx != -1) contactId = it.getString(idIdx)
+                    }
+                }
+                var phoneNumber = ""
+                if (contactId != null) {
+                    val pCursor = context.contentResolver.query(
+                        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                        arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                        "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?",
+                        arrayOf(contactId),
+                        null
+                    )
+                    pCursor?.use { pc ->
+                        if (pc.moveToFirst()) {
+                            val numIdx = pc.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                            if (numIdx != -1) phoneNumber = pc.getString(numIdx) ?: ""
+                        }
+                    }
+                }
+                onSendContactMessage(contactName, phoneNumber.ifBlank { "Sin número" })
+            } catch (e: Exception) {
+                Log.w("ChatDetailScreen", "Error resolving picked contact: ${e.message}")
+            }
+        }
+    }
+
     val matchingIndices = remember(messages, searchChatQuery) {
         if (searchChatQuery.isBlank()) emptyList()
         else messages.mapIndexedNotNull { index, msg ->
@@ -245,6 +292,9 @@ fun ChatDetailScreen(
     var showGifPickerSheet by remember { mutableStateOf(false) }
     var showLocationPickerSheet by remember { mutableStateOf(false) }
     var showCreatePollDialog by remember { mutableStateOf(false) }
+    var showContactShareDialog by remember { mutableStateOf(false) }
+    var contactShareName by remember { mutableStateOf("") }
+    var contactSharePhone by remember { mutableStateOf("") }
     var showPinnedBanner by remember { mutableStateOf(chat.pinnedMessageText != null) }
     var viewingOnceMessage by remember { mutableStateOf<Message?>(null) }
     var showClearChatConfirmDialog by remember { mutableStateOf(false) }
@@ -855,8 +905,7 @@ fun ChatDetailScreen(
                 fileLauncher.launch("*/*")
             },
             onSelectContact = {
-                // Better mock contact sharing
-                onSendContactMessage("Alex Dev", "+595 981 123 456")
+                showContactShareDialog = true
             },
             onSelectAudio = {
                 audioLauncher.launch("audio/*")
@@ -865,6 +914,76 @@ fun ChatDetailScreen(
                 val uri = createTempUri()
                 tempCameraUri = uri
                 cameraVideoLauncher.launch(uri)
+            }
+        )
+    }
+
+    if (showContactShareDialog) {
+        AlertDialog(
+            onDismissRequest = { showContactShareDialog = false },
+            title = { Text("Compartir Contacto", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        "Elige un contacto de tu agenda o ingresa los datos directamente:",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = contactShareName,
+                        onValueChange = { contactShareName = it },
+                        label = { Text("Nombre del contacto") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("contact_share_name_input")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = contactSharePhone,
+                        onValueChange = { contactSharePhone = it },
+                        label = { Text("Número telefónico") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("contact_share_phone_input")
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    TextButton(
+                        onClick = {
+                            try {
+                                contactPickerLauncher.launch(null)
+                                showContactShareDialog = false
+                            } catch (e: Exception) {
+                                Log.w("ChatDetailScreen", "Error launching pick contact: ${e.message}")
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("📋 Seleccionar de la agenda")
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val name = contactShareName.trim().ifBlank { "Contacto" }
+                        val phone = contactSharePhone.trim().ifBlank { "Sin número" }
+                        onSendContactMessage(name, phone)
+                        contactShareName = ""
+                        contactSharePhone = ""
+                        showContactShareDialog = false
+                    },
+                    enabled = contactShareName.isNotBlank() || contactSharePhone.isNotBlank()
+                ) {
+                    Text("Compartir")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showContactShareDialog = false }) {
+                    Text("Cancelar")
+                }
             }
         )
     }

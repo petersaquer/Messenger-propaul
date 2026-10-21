@@ -1112,10 +1112,10 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
         val newChat = Chat(
             id = newId,
             title = title.ifBlank { if (formattedUsername.isNotBlank()) formattedUsername else "Contacto" },
-            subtitle = if (isFirebase) "en línea" else "cifrado de extremo a extremo",
+            subtitle = if (isFirebase) "en línea" else "chat privado local",
             username = formattedUsername,
             type = if (isFirebase) ChatType.DIRECT else ChatType.SECRET,
-            lastMessage = if (isFirebase) "Chat iniciado" else "Chat iniciado con cifrado seguro",
+            lastMessage = if (isFirebase) "Chat iniciado" else "Chat iniciado en dispositivo",
             lastMessageTime = getCurrentTimeString(),
             unreadCount = 0,
             isOnline = isFirebase,
@@ -1133,7 +1133,7 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
             text = if (isFirebase) {
                 "✨ Has iniciado una conversación con $title."
             } else {
-                "🔒 Chat Secreto activado con cifrado de extremo a extremo.\n• Las claves nunca salen de este dispositivo\n• Sin almacenamiento en la nube\n• Huella criptográfica: ${fingerprint ?: "#D4A8"}"
+                "🔒 Chat Privado Local activado.\n• Este chat se almacena únicamente en tu dispositivo\n• Sin sincronización en la nube\n• Identificador de sesión: ${fingerprint ?: "#D4A8"}"
             },
             timestamp = getCurrentTimeString(),
             isOutgoing = false,

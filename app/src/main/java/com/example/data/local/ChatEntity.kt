@@ -30,6 +30,18 @@ data class ChatEntity(
     val avatarGradientStart: Long,
     val avatarGradientEnd: Long,
     val pinnedMessageText: String?,
+    val description: String = "",
+    val participants: String = "",
+    val disappearingTimerSeconds: Int = 0,
+    val isLocked: Boolean = false,
+    val lockPin: String = "",
+    val isArchived: Boolean = false,
+    val keepArchivedOnNewMessage: Boolean = true,
+    val isMarkedUnread: Boolean = false,
+    val mutedUntilTimestamp: Long = 0L,
+    val readReceiptsEnabled: Boolean = true,
+    val selectedTopicId: String? = null,
+    val pinnedMessageIds: String = "",
     val updatedAt: Long = System.currentTimeMillis()
 ) {
     fun toChat(): Chat = Chat(
@@ -56,6 +68,18 @@ data class ChatEntity(
         avatarGradientStart = avatarGradientStart,
         avatarGradientEnd = avatarGradientEnd,
         pinnedMessageText = pinnedMessageText,
+        description = description,
+        participants = if (participants.isNotBlank()) participants.split(",").filter { it.isNotBlank() } else emptyList(),
+        disappearingTimerSeconds = disappearingTimerSeconds,
+        isLocked = isLocked,
+        lockPin = lockPin,
+        isArchived = isArchived,
+        keepArchivedOnNewMessage = keepArchivedOnNewMessage,
+        isMarkedUnread = isMarkedUnread,
+        mutedUntilTimestamp = mutedUntilTimestamp,
+        readReceiptsEnabled = readReceiptsEnabled,
+        selectedTopicId = selectedTopicId,
+        pinnedMessageIds = if (pinnedMessageIds.isNotBlank()) pinnedMessageIds.split(",").filter { it.isNotBlank() } else emptyList(),
         lastUpdatedTimestamp = updatedAt
     )
 
@@ -84,6 +108,18 @@ data class ChatEntity(
             avatarGradientStart = chat.avatarGradientStart,
             avatarGradientEnd = chat.avatarGradientEnd,
             pinnedMessageText = chat.pinnedMessageText,
+            description = chat.description,
+            participants = chat.participants.joinToString(","),
+            disappearingTimerSeconds = chat.disappearingTimerSeconds,
+            isLocked = chat.isLocked,
+            lockPin = chat.lockPin,
+            isArchived = chat.isArchived,
+            keepArchivedOnNewMessage = chat.keepArchivedOnNewMessage,
+            isMarkedUnread = chat.isMarkedUnread,
+            mutedUntilTimestamp = chat.mutedUntilTimestamp,
+            readReceiptsEnabled = chat.readReceiptsEnabled,
+            selectedTopicId = chat.selectedTopicId,
+            pinnedMessageIds = chat.pinnedMessageIds.joinToString(","),
             updatedAt = chat.lastUpdatedTimestamp
         )
     }

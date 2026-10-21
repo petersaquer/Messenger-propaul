@@ -10,7 +10,7 @@ fun CallsDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Llamadas de Voz y Video") },
-        text = { Text("Las llamadas de voz y video con encriptación de extremo a extremo están activas para todos tus contactos.") },
+        text = { Text("Las llamadas de voz y video están disponibles en versión preliminar para pruebas de conectividad de red.") },
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text("Aceptar")

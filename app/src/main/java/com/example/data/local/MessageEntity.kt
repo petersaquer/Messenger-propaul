@@ -39,6 +39,18 @@ data class MessageEntity(
     val starredBy: String = "",
     val deletedFor: String = "",
     val isDeletedForEveryone: Boolean = false,
+    val replyToMessageId: String? = null,
+    val replyToText: String? = null,
+    val replyToSender: String? = null,
+    val userReaction: String? = null,
+    val topicId: String? = null,
+    val expirationTimestamp: Long = 0L,
+    val isPinned: Boolean = false,
+    val isAnonymous: Boolean = false,
+    val userBadge: String? = null,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val locationAddress: String? = null,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     fun toMessage(): Message = Message(
@@ -74,6 +86,16 @@ data class MessageEntity(
         contactUsername = contactUsername,
         gifUrl = gifUrl,
         stickerEmoji = stickerEmoji,
+        replyToMessageId = replyToMessageId,
+        replyToText = replyToText,
+        replyToSender = replyToSender,
+        userReaction = userReaction,
+        topicId = topicId,
+        expirationTimestamp = expirationTimestamp,
+        isPinned = isPinned,
+        isAnonymous = isAnonymous,
+        userBadge = userBadge,
+        locationData = if (latitude != null && longitude != null) com.example.data.model.LocationData(latitude = latitude, longitude = longitude, address = locationAddress ?: "") else null,
         createdAt = createdAt
     )
 
@@ -110,6 +132,18 @@ data class MessageEntity(
             starredBy = message.starredBy.joinToString(","),
             deletedFor = message.deletedFor.joinToString(","),
             isDeletedForEveryone = message.isDeletedForEveryone,
+            replyToMessageId = message.replyToMessageId ?: message.replyTo?.id,
+            replyToText = message.replyToText ?: message.replyTo?.text,
+            replyToSender = message.replyToSender ?: message.replyTo?.senderName,
+            userReaction = message.userReaction,
+            topicId = message.topicId,
+            expirationTimestamp = message.expirationTimestamp,
+            isPinned = message.isPinned,
+            isAnonymous = message.isAnonymous,
+            userBadge = message.userBadge,
+            latitude = message.locationData?.latitude,
+            longitude = message.locationData?.longitude,
+            locationAddress = message.locationData?.address,
             createdAt = if (message.createdAt > 0L) message.createdAt else System.currentTimeMillis()
         )
     }

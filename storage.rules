@@ -9,7 +9,7 @@ service firebase.storage {
 
     function isChatParticipant(chatId) {
       return isAuthenticated() &&
-        request.auth.uid in firestore.get(/databases/ai-studio-android-paulmess-09187c2e-99b7-4597-b840-ec6413b94818/documents/chats/$(chatId)).data.participants;
+        request.auth.uid in firestore.get(/databases/ai-studio-android-paul-297c4c4e-6f78-4a04-b2f5-df0b7f784a65/documents/chats/$(chatId)).data.participants;
     }
 
     // Multimedia de chat (imágenes, videos, documentos, audios)
@@ -41,14 +41,6 @@ service firebase.storage {
         && (request.resource.contentType.matches('image/.*')
             || request.resource.contentType.matches('video/.*'));
       allow delete: if isAuthenticated() && request.auth.uid == userId;
-    }
-
-    // Compatibilidad retroactiva para estados antiguos en /statuses/{statusId}
-    match /statuses/{statusId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated()
-        && request.resource.size < 30 * 1024 * 1024;
-      allow delete: if isAuthenticated();
     }
 
     // Fotos de perfil / avatares

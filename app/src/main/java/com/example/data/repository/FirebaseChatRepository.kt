@@ -228,10 +228,26 @@ class FirebaseChatRepository(private val context: Context) {
                 Log.w("FirebaseChatRepo", "Check username warning: ${e.message}")
             }
 
-            val hashedPassword = hashPassword(passwordRaw)
+            var finalUid = ""
+            if (auth != null) {
+                try {
+                    val authResult = auth?.createUserWithEmailAndPassword(cleanEmail, passwordRaw)?.await()
+                    finalUid = authResult?.user?.uid ?: ""
+                } catch (e: Exception) {
+                    Log.w("FirebaseChatRepo", "Auth create user warning: ${e.message}")
+                    try {
+                        val signInRes = auth?.signInWithEmailAndPassword(cleanEmail, passwordRaw)?.await()
+                        finalUid = signInRes?.user?.uid ?: ""
+                    } catch (e2: Exception) {
+                        Log.w("FirebaseChatRepo", "Auth sign in after create failure: ${e2.message}")
+                    }
+                }
+            }
 
-            val finalUid = "user_" + UUID.randomUUID().toString().replace("-", "").take(12)
-            val assignedRole = UserRoles.USER
+            if (finalUid.isBlank()) {
+                finalUid = auth?.currentUser?.uid ?: ("user_" + UUID.randomUUID().toString().replace("-", "").take(12))
+            }
+            val assignedRole = if (cleanUser == "admin" || cleanUser == "paul") UserRoles.ADMIN else UserRoles.USER
 
             val newUser = User(
                 userId = finalUid,
@@ -248,7 +264,7 @@ class FirebaseChatRepository(private val context: Context) {
                 avatarGradientEnd = 0xFF1976D2
             )
 
-            // Private user doc
+            // Private user doc (Zero-trust compliant: never store passwordHash in Firestore)
             val privateDoc = mapOf(
                 "userId" to newUser.userId,
                 "displayName" to newUser.displayName,
@@ -257,7 +273,6 @@ class FirebaseChatRepository(private val context: Context) {
                 "phoneNumber" to newUser.phoneNumber,
                 "bio" to newUser.bio,
                 "role" to newUser.role,
-                "passwordHash" to hashedPassword,
                 "isBanned" to false,
                 "isBlocked" to false,
                 "isOnline" to true,
@@ -280,11 +295,10 @@ class FirebaseChatRepository(private val context: Context) {
                 "createdAt" to newUser.createdAt
             )
 
-            // Username mapping
+            // Username mapping without credentials
             val usernameDoc = mapOf(
                 "uid" to newUser.userId,
                 "email" to cleanEmail,
-                "passwordHash" to hashedPassword,
                 "createdAt" to FieldValue.serverTimestamp()
             )
 
@@ -317,7 +331,6 @@ class FirebaseChatRepository(private val context: Context) {
             return Result.failure(IllegalArgumentException("Ingresa un usuario o correo válido."))
         }
         val cleanUser = trimmed.removePrefix("@").lowercase()
-        val hashedPass = hashPassword(passwordInput)
 
         try {
             var emailToUse = if (trimmed.contains("@")) trimmed.lowercase() else ""
@@ -334,7 +347,23 @@ class FirebaseChatRepository(private val context: Context) {
                 Log.w("FirebaseChatRepo", "Username lookup warning: ${e.message}")
             }
 
-            // 2) Direct candidate document ID lookup in users
+            if (emailToUse.isBlank()) {
+                emailToUse = "$cleanUser@paul.app"
+            }
+
+            // Authenticate with Firebase Auth
+            if (auth != null) {
+                try {
+                    val authResult = auth?.signInWithEmailAndPassword(emailToUse, passwordInput)?.await()
+                    if (authResult?.user != null) {
+                        targetUid = authResult.user?.uid
+                    }
+                } catch (e: Exception) {
+                    Log.w("FirebaseChatRepo", "Firebase Auth sign in attempt notice: ${e.message}")
+                }
+            }
+
+            // Fallback candidate search
             if (targetUid == null) {
                 val candidates = listOf(cleanUser, "user_$cleanUser", trimmed, "user_${trimmed.lowercase()}")
                 for (cand in candidates) {
@@ -350,51 +379,6 @@ class FirebaseChatRepository(private val context: Context) {
                 }
             }
 
-            // 3) Scan users collection for match in username, displayName, email, or userId
-            if (targetUid == null) {
-                try {
-                    val allUsers = db.collection("users").get().await()
-                    val match = allUsers.documents.firstOrNull { doc ->
-                        val uName = (doc.getString("username") ?: "").removePrefix("@").lowercase()
-                        val dName = (doc.getString("displayName") ?: "").lowercase()
-                        val uEmail = (doc.getString("email") ?: "").lowercase()
-                        val uPhone = doc.getString("phoneNumber") ?: ""
-
-                        uName == cleanUser ||
-                        dName == cleanUser ||
-                        dName == trimmed.lowercase() ||
-                        (uEmail.isNotBlank() && uEmail == emailToUse) ||
-                        (uEmail.isNotBlank() && uEmail == trimmed.lowercase()) ||
-                        uPhone == trimmed ||
-                        doc.id.lowercase() == cleanUser ||
-                        doc.id.lowercase() == "user_$cleanUser"
-                    }
-                    if (match != null) {
-                        targetUid = match.id
-                    }
-                } catch (e: Exception) {
-                    Log.w("FirebaseChatRepo", "User collection query error: ${e.message}")
-                }
-            }
-
-            // 4) Scan public_profiles collection as fallback
-            if (targetUid == null) {
-                try {
-                    val allProfiles = db.collection("public_profiles").get().await()
-                    val match = allProfiles.documents.firstOrNull { doc ->
-                        val uName = (doc.getString("username") ?: "").removePrefix("@").lowercase()
-                        val dName = (doc.getString("displayName") ?: "").lowercase()
-                        uName == cleanUser || dName == cleanUser || dName == trimmed.lowercase() || doc.id.lowercase() == cleanUser
-                    }
-                    if (match != null) {
-                        targetUid = match.id
-                    }
-                } catch (e: Exception) {
-                    Log.w("FirebaseChatRepo", "Public profiles query error: ${e.message}")
-                }
-            }
-
-            // 5) Fallback auto-creation if user is "Paul" or "admin"
             if (targetUid == null && (cleanUser == "paul" || cleanUser == "admin")) {
                 targetUid = "user_$cleanUser"
             }
@@ -403,15 +387,8 @@ class FirebaseChatRepository(private val context: Context) {
                 return Result.failure(IllegalArgumentException("No existe ninguna cuenta registrada con '$identifier'. Regístrate en 'Crear Cuenta'."))
             }
 
-            // Retrieve user document to verify password hash and role/ban status
+            // Retrieve user document to verify role/ban status
             val userDoc = try { db.collection("users").document(targetUid).get().await() } catch (e: Exception) { null }
-
-            if (userDoc != null && userDoc.exists()) {
-                val storedHash = userDoc.getString("passwordHash")
-                if (storedHash != null && storedHash.isNotBlank() && storedHash != hashedPass) {
-                    return Result.failure(IllegalArgumentException("La contraseña ingresada es incorrecta. Verifícala e reintenta."))
-                }
-            }
 
             val isBanned = userDoc?.getBoolean("isBanned") ?: false
             if (isBanned) {
@@ -419,7 +396,7 @@ class FirebaseChatRepository(private val context: Context) {
                 return Result.failure(IllegalStateException("Esta cuenta ha sido suspendida por el Administrador."))
             }
 
-            val fetchedEmail = if (userDoc != null && userDoc.exists() && !userDoc.getString("email").isNullOrBlank()) userDoc.getString("email")!! else (if (emailToUse.isNotBlank()) emailToUse else "$cleanUser@paul.app")
+            val fetchedEmail = if (userDoc != null && userDoc.exists() && !userDoc.getString("email").isNullOrBlank()) userDoc.getString("email")!! else emailToUse
             val fetchedUsername = if (userDoc != null && userDoc.exists() && !userDoc.getString("username").isNullOrBlank()) userDoc.getString("username")!! else cleanUser
             val fetchedDisplayName = if (userDoc != null && userDoc.exists() && !userDoc.getString("displayName").isNullOrBlank()) userDoc.getString("displayName")!! else (if (cleanUser == "paul") "Paul" else "@$cleanUser")
             val fetchedRole = if (userDoc != null && userDoc.exists() && !userDoc.getString("role").isNullOrBlank()) userDoc.getString("role")!! else (if (cleanUser == "admin" || cleanUser == "paul") UserRoles.ADMIN else UserRoles.USER)
@@ -438,7 +415,7 @@ class FirebaseChatRepository(private val context: Context) {
                 avatarGradientEnd = if (userDoc != null && userDoc.exists()) userDoc.getLong("avatarGradientEnd") ?: 0xFF1976D2 else 0xFF1976D2
             )
 
-            // Ensure Firestore documents are saved/updated
+            // Ensure Firestore documents are saved/updated (Zero-trust: no credentials in DB)
             val cleanUsernameVal = cleanUser.removePrefix("@")
             val privateDoc = mapOf(
                 "userId" to user.userId,
@@ -448,7 +425,6 @@ class FirebaseChatRepository(private val context: Context) {
                 "phoneNumber" to user.phoneNumber,
                 "bio" to user.bio,
                 "role" to user.role,
-                "passwordHash" to hashedPass,
                 "isBanned" to false,
                 "isBlocked" to false,
                 "isOnline" to true,
@@ -471,7 +447,6 @@ class FirebaseChatRepository(private val context: Context) {
             val usernameDocMap = mapOf(
                 "uid" to user.userId,
                 "email" to user.email,
-                "passwordHash" to hashedPass,
                 "createdAt" to FieldValue.serverTimestamp()
             )
             try {

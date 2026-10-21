@@ -11,7 +11,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * AppDatabase para almacenamiento local seguro y offline de Paul Messenger.
  * Version 6: Soporte para borrado por usuario (deletedFor) y favoritos multiusuario (starredBy).
  */
-@Database(entities = [ChatEntity::class, MessageEntity::class, ContactEntity::class], version = 6, exportSchema = false)
+@Database(entities = [ChatEntity::class, MessageEntity::class, ContactEntity::class], version = 7, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun messageDao(): MessageDao
