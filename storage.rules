@@ -1,0 +1,63 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isChatParticipant(chatId) {
+      return isAuthenticated() &&
+        request.auth.uid in firestore.get(/databases/ai-studio-android-paulmess-09187c2e-99b7-4597-b840-ec6413b94818/documents/chats/$(chatId)).data.participants;
+    }
+
+    // Multimedia de chat (imágenes, videos, documentos, audios)
+    match /chat_media/{chatId}/{allPaths=**} {
+      allow read: if isChatParticipant(chatId);
+      allow create: if isChatParticipant(chatId)
+        && request.resource.size < 50 * 1024 * 1024
+        && (request.resource.contentType.matches('image/.*')
+            || request.resource.contentType.matches('video/.*')
+            || request.resource.contentType.matches('application/pdf')
+            || request.resource.contentType.matches('audio/.*'));
+      allow delete: if isChatParticipant(chatId);
+    }
+
+    // Notas de voz del chat
+    match /voice_notes/{chatId}/{allPaths=**} {
+      allow read: if isChatParticipant(chatId);
+      allow create: if isChatParticipant(chatId)
+        && request.resource.size < 25 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+      allow delete: if isChatParticipant(chatId);
+    }
+
+    // Estados e historias organizados por usuario (statuses/{userId}/{statusId})
+    match /statuses/{userId}/{statusId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == userId
+        && request.resource.size < 30 * 1024 * 1024
+        && (request.resource.contentType.matches('image/.*')
+            || request.resource.contentType.matches('video/.*'));
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Compatibilidad retroactiva para estados antiguos en /statuses/{statusId}
+    match /statuses/{statusId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+        && request.resource.size < 30 * 1024 * 1024;
+      allow delete: if isAuthenticated();
+    }
+
+    // Fotos de perfil / avatares
+    match /avatars/{userId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && request.auth.uid == userId
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
+    }
+  }
+}
