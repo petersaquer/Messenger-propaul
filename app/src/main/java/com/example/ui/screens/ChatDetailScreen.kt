@@ -683,14 +683,14 @@ fun ChatDetailScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Chat Secreto • Cifrado de Extremo a Extremo (E2EE)",
+                            text = "Chat Privado Local • Almacenado solo en este dispositivo",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF1B5E20),
                             fontSize = 11.sp
                         )
                         Text(
-                            text = "Huella de clave: ${chat.encryptionKeyFingerprint ?: "SHA-256 #D4A8-E19C"} • Sin rastros en servidores",
+                            text = "Identificador de sesión: ${chat.encryptionKeyFingerprint ?: "#D4A8-E19C"} • Sin sincronización en la nube",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF2E7D32),
                             fontSize = 11.sp

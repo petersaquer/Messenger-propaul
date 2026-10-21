@@ -1195,9 +1195,17 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 repository.getLocalMessagesFlow(chat.id).collect { localMsgs ->
                     if (localMsgs.isNotEmpty()) {
-                        val mapped = localMsgs.map { m ->
-                            m.copy(isOutgoing = m.isOutgoingFor(currentUid, currentUsername))
-                        }
+                        val mapped = localMsgs
+                            .filterNot { it.deletedFor.contains(currentUid) }
+                            .map { m ->
+                                m.copy(
+                                    isOutgoing = m.isOutgoingFor(currentUid, currentUsername),
+                                    userReaction = m.reactionsByUser[currentUid] ?: m.userReaction,
+                                    pollData = m.pollData?.let { p ->
+                                        p.copy(userVotedOptionId = p.getVotedOptionFor(currentUid))
+                                    }
+                                )
+                            }
                         _messages.update { currentMap ->
                             val existing = currentMap[chat.id] ?: emptyList()
                             val localIds = mapped.map { it.id }.toSet()
@@ -1212,9 +1220,17 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
             messagesListenerJob = viewModelScope.launch {
                 repository.observeRealtimeMessages(chat.id, viewModelScope).collect { cloudMsgs ->
                     if (cloudMsgs.isNotEmpty()) {
-                        val mapped = cloudMsgs.map { m ->
-                            m.copy(isOutgoing = m.isOutgoingFor(currentUid, currentUsername))
-                        }
+                        val mapped = cloudMsgs
+                            .filterNot { it.deletedFor.contains(currentUid) }
+                            .map { m ->
+                                m.copy(
+                                    isOutgoing = m.isOutgoingFor(currentUid, currentUsername),
+                                    userReaction = m.reactionsByUser[currentUid] ?: m.userReaction,
+                                    pollData = m.pollData?.let { p ->
+                                        p.copy(userVotedOptionId = p.getVotedOptionFor(currentUid))
+                                    }
+                                )
+                            }
                         _messages.update { currentMap ->
                             val existing = currentMap[chat.id] ?: emptyList()
                             val cloudMsgIds = mapped.map { it.id }.toSet()
@@ -1330,11 +1346,12 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 repository.syncChatToCloudAndLocal(updatedChat, listOf(updatedChat.username, targetChat?.contactPhone ?: "", currentUid, currentUsername))
-                repository.syncMessage(chatId, newMessage.copy(status = MessageStatus.SENT), viewModelScope)
+                val syncResult = repository.syncMessage(chatId, newMessage.copy(status = MessageStatus.SENT))
+                val targetStatus = if (syncResult.isSuccess) MessageStatus.SENT else MessageStatus.SENDING
                 _messages.update { currentMap ->
                     val chatMessages = currentMap[chatId] ?: emptyList()
                     currentMap + (chatId to chatMessages.map {
-                        if (it.id == newMessage.id) it.copy(status = MessageStatus.SENT) else it
+                        if (it.id == newMessage.id) it.copy(status = targetStatus) else it
                     })
                 }
             } catch (e: Exception) {
@@ -1344,13 +1361,20 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun markMessageAsViewed(chatId: String, messageId: String) {
+        val currentMsg = _messages.value[chatId]?.find { it.id == messageId } ?: return
+        val updatedMsg = currentMsg.copy(hasBeenViewed = true)
         _messages.update { currentMap ->
             val chatMessages = currentMap[chatId] ?: emptyList()
             currentMap + (chatId to chatMessages.map { msg ->
-                if (msg.id == messageId && msg.isViewOnce) {
-                    msg.copy(hasBeenViewed = true)
-                } else msg
+                if (msg.id == messageId && msg.isViewOnce) updatedMsg else msg
             })
+        }
+        viewModelScope.launch {
+            try {
+                repository.syncMessage(chatId, updatedMsg)
+            } catch (e: Exception) {
+                Log.w("PaulViewModel", "Error persisting viewed state: ${e.message}")
+            }
         }
     }
 
@@ -1402,19 +1426,19 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
 
         if (seconds >= 1 && recordedFile != null && recordedFile.exists() && recordedFile.length() > 0) {
             viewModelScope.launch {
-                var audioUrl = recordedFile.absolutePath
+                var cloudAudioUrl: String? = null
                 try {
                     val uploadResult = repository.uploadVoiceNote(recordedFile, chatId)
                     if (uploadResult.isSuccess) {
-                        audioUrl = uploadResult.getOrNull() ?: recordedFile.absolutePath
+                        cloudAudioUrl = uploadResult.getOrNull()
                     }
                 } catch (e: Exception) {
-                    Log.w("PaulViewModel", "Upload voice warning, using local path: ${e.message}")
+                    Log.w("PaulViewModel", "Upload voice warning: ${e.message}")
                 }
-                sendVoiceMessage(chatId, seconds, audioUrl, waveformSample)
+                // Never send local device paths to other users: only public cloud URL or local sender path
+                sendVoiceMessage(chatId, seconds, cloudAudioUrl, waveformSample, localRecordedPath = recordedFile.absolutePath)
             }
         } else if (seconds >= 1) {
-            // Fallback si no se generó archivo en disco
             sendVoiceMessage(chatId, seconds, null, waveformSample)
         }
     }
@@ -1423,7 +1447,8 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
         chatId: String,
         durationSeconds: Int,
         filePath: String? = null,
-        waveform: List<Float>? = null
+        waveform: List<Float>? = null,
+        localRecordedPath: String? = null
     ) {
         val targetChat = _chats.value.find { it.id == chatId }
         val currentUid = _currentUser.value?.userId ?: ""
@@ -1445,9 +1470,9 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
             voiceDurationSeconds = durationSeconds,
             voiceWaveform = waveform,
             fileUrl = filePath,
-            voiceFilePath = filePath,
+            voiceFilePath = localRecordedPath ?: filePath,
             isEncrypted = isEncrypted,
-            status = MessageStatus.SENT
+            status = if (filePath != null || targetChat?.isCloudSynced == false) MessageStatus.SENT else MessageStatus.SENDING
         )
 
         val now = System.currentTimeMillis()
@@ -1638,7 +1663,7 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
             senderName = currentName,
             type = MessageType.VIDEO,
             videoUrl = videoUrl,
-            photoUrl = videoUrl,
+            photoUrl = null,
             isEncrypted = isEncrypted,
             status = MessageStatus.SENDING
         )
@@ -1793,8 +1818,8 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun votePoll(messageId: String, optionId: Int) {
+        val currentUid = _currentUser.value?.userId ?: ""
         var updatedChatId: String? = null
-        var updatedMessage: Message? = null
 
         _messages.update { currentMap ->
             currentMap.mapValues { (cid, messageList) ->
@@ -1802,28 +1827,27 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
                     if (message.id == messageId && message.pollData != null) {
                         updatedChatId = cid
                         val currentPoll = message.pollData
-                        val previousVote = currentPoll.userVotedOptionId
-
-                        val newOptions = currentPoll.options.map { opt ->
-                            when {
-                                opt.id == optionId && previousVote == optionId -> opt.copy(voteCount = (opt.voteCount - 1).coerceAtLeast(0))
-                                opt.id == optionId -> opt.copy(voteCount = opt.voteCount + 1)
-                                opt.id == previousVote -> opt.copy(voteCount = (opt.voteCount - 1).coerceAtLeast(0))
-                                else -> opt
-                            }
+                        val votes = currentPoll.votesByUser.toMutableMap()
+                        if (votes[currentUid] == optionId) {
+                            votes.remove(currentUid)
+                        } else {
+                            votes[currentUid] = optionId
                         }
 
-                        val newVotedOptionId = if (previousVote == optionId) null else optionId
-                        val newTotalVotes = newOptions.sumOf { it.voteCount }
+                        val newOptions = currentPoll.options.map { opt ->
+                            opt.copy(voteCount = votes.values.count { it == opt.id })
+                        }
+                        val newVotedOptionId = votes[currentUid]
+                        val newTotalVotes = votes.size
 
-                        updatedMessage = message.copy(
+                        message.copy(
                             pollData = currentPoll.copy(
                                 options = newOptions,
                                 totalVotes = newTotalVotes,
-                                userVotedOptionId = newVotedOptionId
+                                userVotedOptionId = newVotedOptionId,
+                                votesByUser = votes
                             )
                         )
-                        updatedMessage!!
                     } else {
                         message
                     }
@@ -1832,36 +1856,36 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         updatedChatId?.let { cid ->
-            updatedMessage?.let { msg ->
-                repository.syncMessage(cid, msg, viewModelScope)
+            viewModelScope.launch {
+                repository.votePoll(cid, messageId, optionId, currentUid)
             }
         }
     }
 
     fun addReaction(messageId: String, emoji: String) {
+        val currentUid = _currentUser.value?.userId ?: ""
         var updatedChatId: String? = null
-        var updatedMessage: Message? = null
 
         _messages.update { currentMap ->
             currentMap.mapValues { (cid, messageList) ->
                 messageList.map { message ->
                     if (message.id == messageId) {
                         updatedChatId = cid
-                        val currentReactions = message.reactions
-                        val count = currentReactions[emoji] ?: 0
-                        val isRemoving = count > 0 && message.userReaction == emoji
-                        
-                        val newReactions = if (isRemoving) {
-                            currentReactions - emoji
+                        val userReactions = message.reactionsByUser.toMutableMap()
+                        val isRemoving = userReactions[currentUid] == emoji
+                        if (isRemoving) {
+                            userReactions.remove(currentUid)
                         } else {
-                            currentReactions + (emoji to (count + 1))
+                            userReactions[currentUid] = emoji
                         }
-                        
-                        updatedMessage = message.copy(
-                            reactions = newReactions,
+
+                        val countMap = userReactions.values.groupingBy { it }.eachCount()
+
+                        message.copy(
+                            reactions = countMap,
+                            reactionsByUser = userReactions,
                             userReaction = if (isRemoving) null else emoji
                         )
-                        updatedMessage!!
                     } else {
                         message
                     }
@@ -1870,8 +1894,8 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         updatedChatId?.let { cid ->
-            updatedMessage?.let { msg ->
-                repository.syncMessage(cid, msg, viewModelScope)
+            viewModelScope.launch {
+                repository.updateReaction(cid, messageId, emoji, currentUid)
             }
         }
     }
@@ -2019,20 +2043,29 @@ class PaulViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteMessageForMe(chatId: String, messageId: String) {
+        val currentUid = _currentUser.value?.userId ?: ""
         _messages.update { map ->
             val list = map[chatId] ?: emptyList()
             map + (chatId to list.filterNot { it.id == messageId })
         }
-        viewModelScope.launch { repository.deleteLocalMessage(messageId) }
+        viewModelScope.launch { repository.deleteMessageForMe(chatId, messageId, currentUid) }
     }
 
     fun deleteMessageForEveryone(chatId: String, messageId: String) {
+        val currentUid = _currentUser.value?.userId ?: ""
         _messages.update { map ->
             val list = map[chatId] ?: emptyList()
             map + (chatId to list.map {
                 if (it.id == messageId) {
-                    val revoked = it.copy(text = "🚫 Este mensaje fue eliminado", isDeletedForEveryone = true)
-                    viewModelScope.launch { repository.syncMessage(chatId, revoked, viewModelScope) }
+                    val revoked = it.copy(
+                        text = "🚫 Este mensaje fue eliminado",
+                        isDeletedForEveryone = true,
+                        photoUrl = null,
+                        videoUrl = null,
+                        fileUrl = null,
+                        voiceFilePath = null
+                    )
+                    viewModelScope.launch { repository.deleteMessageForEveryone(chatId, messageId, currentUid) }
                     revoked
                 } else it
             })

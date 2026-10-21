@@ -17,6 +17,9 @@ interface MessageDao {
     @Query("SELECT * FROM messages ORDER BY createdAt ASC")
     suspend fun getAllMessages(): List<MessageEntity>
 
+    @Query("SELECT * FROM messages WHERE id = :messageId LIMIT 1")
+    suspend fun getMessageById(messageId: String): MessageEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateMessage(message: MessageEntity)
 

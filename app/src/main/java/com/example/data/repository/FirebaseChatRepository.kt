@@ -670,29 +670,37 @@ class FirebaseChatRepository(private val context: Context) {
     /**
      * Sync Message to both local Room DB and Cloud Firestore
      */
-    fun syncMessage(chatId: String, message: Message, scope: CoroutineScope) {
-        // 1. Immediately save message to local Room DB on disk
-        scope.launch(Dispatchers.IO) {
+    suspend fun syncMessage(chatId: String, message: Message): Result<Unit> {
+        return withContext(Dispatchers.IO) {
+            // 1. Immediately save message to local Room DB on disk
             try {
                 messageDao.insertOrUpdateMessage(MessageEntity.fromMessage(message))
             } catch (e: Exception) {
                 Log.w("FirebaseChatRepo", "Error saving message to Room DB: ${e.message}")
             }
-        }
 
-        // 2. Sync to Cloud Firestore
-        try {
-            db.collection("chats").document(chatId).collection("messages").document(message.id).set(message)
-            
-            // Also update last message on the chat document in Firestore
-            val chatUpdates = mapOf(
-                "lastMessage" to if (message.isViewOnce) "🔒 Mensaje de lectura única" else message.text,
-                "lastMessageTime" to message.timestamp,
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            db.collection("chats").document(chatId).set(chatUpdates, SetOptions.merge())
-        } catch (e: Exception) {
-            Log.w("FirebaseChatRepo", "syncMessage error: ${e.message}")
+            // 2. Sync to Cloud Firestore with await()
+            try {
+                db.collection("chats").document(chatId).collection("messages").document(message.id).set(message).await()
+                
+                // Also update last message on the chat document in Firestore
+                val chatUpdates = mapOf(
+                    "lastMessage" to if (message.isViewOnce) "🔒 Mensaje de lectura única" else message.text,
+                    "lastMessageTime" to message.timestamp,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                db.collection("chats").document(chatId).set(chatUpdates, SetOptions.merge()).await()
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Log.w("FirebaseChatRepo", "syncMessage cloud error: ${e.message}")
+                Result.failure(e)
+            }
+        }
+    }
+
+    fun syncMessage(chatId: String, message: Message, scope: CoroutineScope) {
+        scope.launch(Dispatchers.IO) {
+            syncMessage(chatId, message)
         }
     }
 
@@ -746,30 +754,68 @@ class FirebaseChatRepository(private val context: Context) {
         }
     }
 
-    suspend fun deleteMessageForMe(chatId: String, messageId: String, scope: CoroutineScope): Result<Unit> {
+    suspend fun deleteMessageForMe(chatId: String, messageId: String, userId: String = activeUser?.userId ?: ""): Result<Unit> {
         return try {
             deleteLocalMessage(messageId)
+            if (userId.isNotBlank()) {
+                db.collection("chats").document(chatId).collection("messages").document(messageId)
+                    .update("deletedFor", FieldValue.arrayUnion(userId))
+                    .await()
+            }
             Result.success(Unit)
         } catch (e: Exception) {
+            Log.w("FirebaseChatRepo", "deleteMessageForMe cloud warning: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteMessageForMe(chatId: String, messageId: String, scope: CoroutineScope): Result<Unit> {
+        return deleteMessageForMe(chatId, messageId, activeUser?.userId ?: "")
+    }
+
+    suspend fun deleteMessageForEveryone(chatId: String, messageId: String, requesterUid: String = activeUser?.userId ?: ""): Result<Unit> {
+        return try {
+            val msgRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
+            val snapshot = msgRef.get().await()
+            val senderId = snapshot.getString("senderId") ?: ""
+            if (requesterUid.isNotBlank() && senderId.isNotBlank() && senderId != requesterUid && activeUser?.role != UserRoles.ADMIN) {
+                return Result.failure(IllegalAccessException("Solo el remitente o un administrador puede eliminar este mensaje para todos."))
+            }
+
+            val updates = mapOf(
+                "isDeletedForEveryone" to true,
+                "text" to "🚫 Este mensaje fue eliminado",
+                "photoUrl" to null,
+                "videoUrl" to null,
+                "fileUrl" to null,
+                "voiceFilePath" to null,
+                "mediaUrl" to null,
+                "status" to com.example.data.model.MessageStatus.READ.name,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            msgRef.update(updates).await()
+
+            val local = messageDao.getMessageById(messageId)
+            if (local != null) {
+                messageDao.insertOrUpdateMessage(
+                    local.copy(
+                        isDeletedForEveryone = true,
+                        text = "🚫 Este mensaje fue eliminado",
+                        photoUrl = null,
+                        videoUrl = null,
+                        fileUrl = null
+                    )
+                )
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.w("FirebaseChatRepo", "Error revoking message for everyone: ${e.message}")
             Result.failure(e)
         }
     }
 
     suspend fun deleteMessageForEveryone(chatId: String, messageId: String, scope: CoroutineScope): Result<Unit> {
-        return try {
-            val revoked = Message(
-                id = messageId,
-                chatId = chatId,
-                text = "🚫 Este mensaje fue eliminado",
-                isDeletedForEveryone = true,
-                status = com.example.data.model.MessageStatus.READ,
-                timestamp = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-            )
-            syncMessage(chatId, revoked, scope)
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        return deleteMessageForEveryone(chatId, messageId, activeUser?.userId ?: "")
     }
 
     suspend fun markMessageDelivered(chatId: String, messageId: String, scope: CoroutineScope): Result<Unit> {
@@ -795,41 +841,87 @@ class FirebaseChatRepository(private val context: Context) {
         }
     }
 
-    suspend fun updateReaction(chatId: String, messageId: String, emoji: String, currentUid: String, scope: CoroutineScope): Result<Unit> {
+    suspend fun updateReaction(chatId: String, messageId: String, emoji: String, currentUid: String): Result<Unit> {
         return try {
             val docRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
-            val doc = docRef.get().await()
-            val currentReactions = (doc.get("reactions") as? Map<String, Long>)?.mapValues { it.value.toInt() }?.toMutableMap() ?: mutableMapOf()
-            val count = currentReactions[emoji] ?: 0
-            if (count > 0) {
-                currentReactions[emoji] = count + 1
-            } else {
-                currentReactions[emoji] = 1
-            }
-            docRef.update("reactions", currentReactions).await()
+            db.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                val rawMap = snapshot.get("reactionsByUser") as? Map<String, String> ?: emptyMap()
+                val userReactions = rawMap.toMutableMap()
+                
+                val userKey = currentUid.ifBlank { activeUser?.userId ?: "user" }
+                if (userReactions[userKey] == emoji) {
+                    userReactions.remove(userKey)
+                } else {
+                    userReactions[userKey] = emoji
+                }
+                
+                val countMap = userReactions.values.groupingBy { it }.eachCount().mapValues { it.value.toLong() }
+                transaction.update(docRef, mapOf(
+                    "reactionsByUser" to userReactions,
+                    "reactions" to countMap
+                ))
+            }.await()
             Result.success(Unit)
         } catch (e: Exception) {
+            Log.w("FirebaseChatRepo", "Error updating reaction: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateReaction(chatId: String, messageId: String, emoji: String, currentUid: String, scope: CoroutineScope): Result<Unit> {
+        return updateReaction(chatId, messageId, emoji, currentUid)
+    }
+
+    suspend fun votePoll(chatId: String, messageId: String, optionId: Int, userId: String = activeUser?.userId ?: ""): Result<Unit> {
+        return try {
+            val docRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
+            db.runTransaction { transaction ->
+                val snapshot = transaction.get(docRef)
+                val rawPoll = snapshot.get("pollData") as? Map<String, Any>
+                if (rawPoll != null) {
+                    val rawVotesByUser = rawPoll["votesByUser"] as? Map<String, Long> ?: emptyMap()
+                    val votesByUser = rawVotesByUser.mapValues { it.value.toInt() }.toMutableMap()
+                    val voterKey = userId.ifBlank { activeUser?.userId ?: "user" }
+                    
+                    if (votesByUser[voterKey] == optionId) {
+                        votesByUser.remove(voterKey)
+                    } else {
+                        votesByUser[voterKey] = optionId
+                    }
+
+                    val rawOptions = rawPoll["options"] as? List<Map<String, Any>> ?: emptyList()
+                    val updatedOptions = rawOptions.map { optMap ->
+                        val optId = (optMap["id"] as? Number)?.toInt() ?: 0
+                        val optText = optMap["text"] as? String ?: ""
+                        val voteCount = votesByUser.values.count { it == optId }
+                        mapOf(
+                            "id" to optId,
+                            "text" to optText,
+                            "voteCount" to voteCount
+                        )
+                    }
+
+                    val updatedPollMap = mapOf(
+                        "id" to (rawPoll["id"] as? String ?: ""),
+                        "question" to (rawPoll["question"] as? String ?: ""),
+                        "options" to updatedOptions,
+                        "totalVotes" to votesByUser.size,
+                        "votesByUser" to votesByUser,
+                        "isAnonymous" to (rawPoll["isAnonymous"] as? Boolean ?: true)
+                    )
+                    transaction.update(docRef, "pollData", updatedPollMap)
+                }
+            }.await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.w("FirebaseChatRepo", "Error voting poll: ${e.message}")
             Result.failure(e)
         }
     }
 
     suspend fun votePoll(chatId: String, messageId: String, optionId: Int, scope: CoroutineScope): Result<Unit> {
-        return try {
-            val docRef = db.collection("chats").document(chatId).collection("messages").document(messageId)
-            val doc = docRef.get().await()
-            val msg = doc.toObject(Message::class.java)
-            if (msg?.pollData != null) {
-                val poll = msg.pollData
-                val newOptions = poll.options.map { opt ->
-                    if (opt.id == optionId) opt.copy(voteCount = opt.voteCount + 1) else opt
-                }
-                val updatedPoll = poll.copy(options = newOptions, totalVotes = poll.totalVotes + 1, userVotedOptionId = optionId)
-                docRef.update("pollData", updatedPoll).await()
-            }
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        return votePoll(chatId, messageId, optionId, activeUser?.userId ?: "")
     }
 
     suspend fun persistChat(chat: Chat, scope: CoroutineScope) {
@@ -951,7 +1043,7 @@ class FirebaseChatRepository(private val context: Context) {
                     type = rawChat["type"] as? String ?: ChatType.DIRECT.name,
                     lastMessage = rawChat["lastMessage"] as? String ?: "",
                     lastMessageTime = rawChat["lastMessageTime"] as? String ?: "",
-                    unreadCount = (rawChat["unreadCount"] as? Long)?.toInt() ?: 0,
+                    unreadCount = (rawChat["unreadCount"] as? Number)?.toInt() ?: 0,
                     isOnline = rawChat["isOnline"] as? Boolean ?: false,
                     isPinned = rawChat["isPinned"] as? Boolean ?: false,
                     isMuted = rawChat["isMuted"] as? Boolean ?: false,
@@ -959,13 +1051,26 @@ class FirebaseChatRepository(private val context: Context) {
                     isEncrypted = rawChat["isEncrypted"] as? Boolean ?: false,
                     isCloudSynced = rawChat["isCloudSynced"] as? Boolean ?: true,
                     isBlocked = rawChat["isBlocked"] as? Boolean ?: false,
+                    deletedFor = rawChat["deletedFor"] as? String ?: "",
                     encryptionKeyFingerprint = rawChat["encryptionKeyFingerprint"] as? String,
                     contactPhone = rawChat["contactPhone"] as? String,
                     typingStatus = rawChat["typingStatus"] as? String,
-                    memberCount = (rawChat["memberCount"] as? Long)?.toInt(),
-                    avatarGradientStart = rawChat["avatarGradientStart"] as? Long ?: 0xFF2AABEE,
-                    avatarGradientEnd = rawChat["avatarGradientEnd"] as? Long ?: 0xFF1976D2,
-                    pinnedMessageText = rawChat["pinnedMessageText"] as? String
+                    memberCount = (rawChat["memberCount"] as? Number)?.toInt(),
+                    avatarGradientStart = (rawChat["avatarGradientStart"] as? Number)?.toLong() ?: 0xFF2AABEE,
+                    avatarGradientEnd = (rawChat["avatarGradientEnd"] as? Number)?.toLong() ?: 0xFF1976D2,
+                    pinnedMessageText = rawChat["pinnedMessageText"] as? String,
+                    description = rawChat["description"] as? String ?: "",
+                    participants = rawChat["participants"] as? String ?: "",
+                    disappearingTimerSeconds = (rawChat["disappearingTimerSeconds"] as? Number)?.toInt() ?: 0,
+                    isLocked = rawChat["isLocked"] as? Boolean ?: false,
+                    lockPin = rawChat["lockPin"] as? String ?: "",
+                    isArchived = rawChat["isArchived"] as? Boolean ?: false,
+                    keepArchivedOnNewMessage = rawChat["keepArchivedOnNewMessage"] as? Boolean ?: true,
+                    isMarkedUnread = rawChat["isMarkedUnread"] as? Boolean ?: false,
+                    mutedUntilTimestamp = (rawChat["mutedUntilTimestamp"] as? Number)?.toLong() ?: 0L,
+                    readReceiptsEnabled = rawChat["readReceiptsEnabled"] as? Boolean ?: true,
+                    selectedTopicId = rawChat["selectedTopicId"] as? String,
+                    pinnedMessageIds = rawChat["pinnedMessageIds"] as? String ?: ""
                 )
                 chatDao.insertOrUpdateChat(entity)
                 restoredCount++
@@ -981,14 +1086,14 @@ class FirebaseChatRepository(private val context: Context) {
                     timestamp = rawMsg["timestamp"] as? String ?: "",
                     isOutgoing = rawMsg["isOutgoing"] as? Boolean ?: false,
                     senderName = rawMsg["senderName"] as? String,
-                    senderAvatarGradient = rawMsg["senderAvatarGradient"] as? Long,
+                    senderAvatarGradient = (rawMsg["senderAvatarGradient"] as? Number)?.toLong(),
                     status = rawMsg["status"] as? String ?: "READ",
                     type = rawMsg["type"] as? String ?: "TEXT",
                     isEncrypted = rawMsg["isEncrypted"] as? Boolean ?: false,
                     isViewOnce = rawMsg["isViewOnce"] as? Boolean ?: false,
                     hasBeenViewed = rawMsg["hasBeenViewed"] as? Boolean ?: false,
                     forwardedFrom = rawMsg["forwardedFrom"] as? String,
-                    voiceDurationSeconds = (rawMsg["voiceDurationSeconds"] as? Long)?.toInt(),
+                    voiceDurationSeconds = (rawMsg["voiceDurationSeconds"] as? Number)?.toInt(),
                     photoUrl = rawMsg["photoUrl"] as? String,
                     videoUrl = rawMsg["videoUrl"] as? String,
                     fileUrl = rawMsg["fileUrl"] as? String,
@@ -998,7 +1103,25 @@ class FirebaseChatRepository(private val context: Context) {
                     contactPhone = rawMsg["contactPhone"] as? String,
                     contactUsername = rawMsg["contactUsername"] as? String,
                     gifUrl = rawMsg["gifUrl"] as? String,
-                    stickerEmoji = rawMsg["stickerEmoji"] as? String
+                    stickerEmoji = rawMsg["stickerEmoji"] as? String,
+                    isEdited = rawMsg["isEdited"] as? Boolean ?: false,
+                    isStarred = rawMsg["isStarred"] as? Boolean ?: false,
+                    starredBy = rawMsg["starredBy"] as? String ?: "",
+                    deletedFor = rawMsg["deletedFor"] as? String ?: "",
+                    isDeletedForEveryone = rawMsg["isDeletedForEveryone"] as? Boolean ?: false,
+                    replyToMessageId = rawMsg["replyToMessageId"] as? String,
+                    replyToText = rawMsg["replyToText"] as? String,
+                    replyToSender = rawMsg["replyToSender"] as? String,
+                    userReaction = rawMsg["userReaction"] as? String,
+                    topicId = rawMsg["topicId"] as? String,
+                    expirationTimestamp = (rawMsg["expirationTimestamp"] as? Number)?.toLong() ?: 0L,
+                    isPinned = rawMsg["isPinned"] as? Boolean ?: false,
+                    isAnonymous = rawMsg["isAnonymous"] as? Boolean ?: false,
+                    userBadge = rawMsg["userBadge"] as? String,
+                    latitude = (rawMsg["latitude"] as? Number)?.toDouble(),
+                    longitude = (rawMsg["longitude"] as? Number)?.toDouble(),
+                    locationAddress = rawMsg["locationAddress"] as? String,
+                    createdAt = (rawMsg["createdAt"] as? Number)?.toLong() ?: System.currentTimeMillis()
                 )
                 messageDao.insertOrUpdateMessage(msgEntity)
             }

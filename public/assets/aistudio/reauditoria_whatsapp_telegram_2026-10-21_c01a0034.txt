@@ -1,0 +1,188 @@
+REAUDITORÍA DE VERIFICACIÓN — PAUL MESSENGER
+Fecha: 2026-10-21
+Repositorio auditado: petersaquer/Messenger-propaul
+Estado observado: HEAD 71afcb0, sin cambios versionados posteriores
+
+======================================================================
+1. RESULTADO DE VERIFICACIÓN DE LOS PARCHES
+======================================================================
+
+Los parches no están presentes en el entorno/repositorio que pude inspeccionar:
+
+- `git status --short --branch`: solo aparece el archivo de auditoría no versionado.
+- `git log`: HEAD continúa en `71afcb0 (feat: initialize Paul Messenger project)`.
+- `git diff --stat`: vacío.
+- `firestore.rules:5` todavía contiene `allow read, write: if true;`.
+- Sigue existiendo `passwordHash` y `hashPassword` en FirebaseChatRepository.kt.
+- Sigue existiendo el contacto hardcodeado `Alex Dev` en ChatDetailScreen.kt:858-859.
+- Sigue sin existir FCM, WebRTC, `PeerConnection`, `PendingIntent` o un servicio de notificaciones push.
+
+Conclusión: no es posible certificar la aplicación de los parches desde este entorno. Si los cambios fueron realizados en otro clon, rama, dispositivo o commit, hay que sincronizar esa rama o indicar el commit exacto para poder verificarla.
+
+La comprobación de Cloud Functions sí fue posible: `node --check functions/index.js` terminó correctamente. Esto solo valida sintaxis JavaScript; no valida reglas, despliegue ni comportamiento en Firebase.
+
+======================================================================
+2. ERRORES CRÍTICOS QUE SIGUEN ABIERTOS
+======================================================================
+
+[CRÍTICO] FIRESTORE COMPLETAMENTE ABIERTO
+Archivo: firestore.rules:1-8
+
+`allow read, write: if true` permite que cualquier cliente, sin autenticación, lea o modifique usuarios, chats, mensajes, roles y backups. Cualquier corrección del cliente Android es insuficiente mientras esta regla siga desplegada.
+
+Acción: aplicar y desplegar reglas restrictivas; probar con Firebase Emulator antes de producción.
+
+[CRÍTICO] AUTENTICACIÓN MANUAL CON HASH DÉBIL Y AUTORIDAD EN EL CLIENTE
+Archivo: FirebaseChatRepository.kt:203-497
+
+El cliente crea y valida SHA-256 con sal fija (`paul_salt_`), guarda `passwordHash` en Firestore y escribe perfiles durante el login. Además, los documentos de usuarios se consultan masivamente y existen fallbacks automáticos para `paul` y `admin`.
+
+Riesgos: credenciales recuperables por fuerza bruta, enumeración de usuarios, creación de identidades no respaldadas por Firebase Auth y elevación de rol si las reglas están abiertas.
+
+Acción: Firebase Auth como única fuente de identidad; eliminar hashes y fallbacks de admin.
+
+[CRÍTICO] PROMESAS DE E2E SIN CIFRADO E2E
+Archivos: ChatDetailScreen.kt:618-640, AddContactDialog.kt:234-266, ContactViewerDialog.kt:337, ActiveCallScreen.kt:124-129, Message.kt
+
+Se muestran textos como “Cifrado de Extremo a Extremo (E2EE)” y una huella SHA-256 fija, pero `syncMessage` guarda el objeto Message directamente en Firestore. No existe una capa criptográfica, gestión de claves, verificación de identidad ni cifrado de llamadas.
+
+Acción: implementar un protocolo criptográfico auditado o retirar inmediatamente toda afirmación E2E.
+
+======================================================================
+3. ERRORES FUNCIONALES Y DE LÓGICA ADICIONALES
+======================================================================
+
+[ALTO] `sendMessage` marca como SENT aunque la escritura cloud falle
+Archivos: PaulViewModel.kt:1329-1343, FirebaseChatRepository.kt:698-722
+
+`syncMessage` no es suspend y llama a `.set(message)` y `.set(chatUpdates)` sin `await()`. Por tanto, `sendMessage` continúa y marca la copia UI como `MessageStatus.SENT` aunque el write todavía esté pendiente o falle. Las excepciones no llegan al llamador.
+
+Impacto tipo WhatsApp/Telegram: mensajes perdidos que aparecen como enviados, ausencia de reintento y estados de entrega falsos.
+
+Corrección: convertir syncMessage en suspend, esperar ambas escrituras, devolver Result/estado de error y usar una outbox idempotente con reintentos.
+
+[ALTO] Borrado “para mí” solo borra Room y vuelve el mensaje a aparecer desde Firestore
+Archivos: PaulViewModel.kt:2021-2027, FirebaseChatRepository.kt:774-781
+
+`deleteMessageForMe` elimina el mensaje localmente, pero no guarda `deletedFor` en Firestore. El listener remoto puede descargarlo de nuevo después de reiniciar, sincronizar o abrir el chat en otro dispositivo.
+
+Corrección: persistir `deletedFor` por UID mediante una actualización autorizada en reglas; filtrar mensajes para ese usuario en el cliente y, preferiblemente, mantener la copia remota con tombstone.
+
+[ALTO] “Ver una vez” no se persiste
+Archivos: PaulViewModel.kt:1346-1355, Message.kt
+
+`markMessageAsViewed` solo cambia `_messages` en memoria. No actualiza Firestore ni Room, así que `hasBeenViewed` se pierde al cerrar/reabrir. El mensaje puede volver a abrirse o no respetar la expiración prevista.
+
+Corrección: transacción/autorización server-side que registre el primer view por usuario, impida segunda lectura y elimine/revoque media según la política.
+
+[ALTO] Reacciones no son por usuario y siempre incrementan
+Archivo: FirebaseChatRepository.kt:823-839
+
+El parámetro `currentUid` no se utiliza. El método solo aumenta el contador de un emoji, no permite quitar/cambiar reacción y dos clientes pueden perder actualizaciones por read-modify-write no transaccional.
+
+Corrección: guardar `reactionsByUser.{uid}` o subcolección por UID; usar transacción y actualizar contadores de forma atómica.
+
+[ALTO] Encuestas permiten doble voto y comparten `userVotedOptionId`
+Archivos: FirebaseChatRepository.kt:841-857, PaulViewModel.kt:1795-1815
+
+`userVotedOptionId` está dentro del mensaje compartido, no es un valor independiente por usuario. El backend no verifica si el usuario ya votó, y el read-modify-write no es transaccional. El último voto puede sobrescribir el estado visible para todos.
+
+Corrección: subcolección `pollVotes/{uid}` o mapa por UID con reglas; transacción que rechace/reemplace el voto según configuración de la encuesta.
+
+[ALTO] Borrado para todos puede aceptar cualquier mensaje y depende de reglas abiertas
+Archivos: FirebaseChatRepository.kt:783-797, PaulViewModel.kt:2029-2040
+
+El repositorio puede construir un mensaje revocado nuevo con pocos campos y sincronizarlo. Con reglas abiertas, cualquier cliente puede revocar cualquier mensaje. Si se aplica sobre el documento completo, debe conservar metadatos y aplicar política de tiempo/autor.
+
+Corrección: función/regla que compruebe senderId, ventana de borrado, participantes y que solo modifique campos de revocación; no reemplazar el documento completo.
+
+[ALTO] Contacto compartido continúa siendo ficticio
+Archivo: ChatDetailScreen.kt:857-860
+
+La hoja de adjuntos sigue enviando siempre `Alex Dev` y `+595 981 123 456`. No hay selector de ContactsContract ni confirmación del usuario.
+
+Corrección: eliminar el hardcode y conectar un picker real con permiso runtime y normalización telefónica.
+
+[ALTO] Llamadas son solamente una animación
+Archivos: ActiveCallScreen.kt:61-265, ChatDetailScreen.kt:816-824 y 1131-1137
+
+El temporizador empieza al abrir el diálogo; los controles solo cambian booleanos locales. No existe audio/video, conexión entre dispositivos, señalización ni WebRTC. También se afirma cifrado E2E de la llamada.
+
+Corrección: integrar WebRTC y señalización autenticada, o retirar el flujo y mostrar “próximamente”.
+
+[ALTO] Notificaciones no funcionan con el proceso terminado
+Archivos: PaulViewModel.kt:2171-2205, NotificationHelper.kt, AndroidManifest.xml
+
+El sistema depende de listeners Firestore dentro del ViewModel. No hay FCM, servicio de mensajes, token por usuario, PendingIntent ni notificación de background. La aplicación cerrada no recibe mensajes nuevos.
+
+Corrección: FCM + Cloud Function al crear mensaje + PendingIntent seguro a chat; mantener listeners solo para UI en foreground.
+
+[ALTO] Fallback de voz envía una ruta de archivo local al destinatario
+Archivos: PaulViewModel.kt:1390-1415, FirebaseStorageHelper.kt
+
+Cuando falla la subida, `audioUrl` queda como `recordedFile.absolutePath` y se sincroniza como `fileUrl`. Esa ruta solo existe en el dispositivo emisor. El receptor no puede reproducirla; además puede quedar un mensaje enviado sin media.
+
+Corrección: no marcar enviado hasta completar upload; dejar en cola/reintentar o marcar FAILED, nunca enviar rutas locales.
+
+[MEDIO] La actualización de video rellena `photoUrl`
+Archivo: PaulViewModel.kt:1622-1643
+
+`sendVideoMessage` asigna simultáneamente `videoUrl = videoUrl` y `photoUrl = videoUrl`. Puede provocar que el renderer trate un vídeo como imagen o que el modelo de persistencia tenga datos contradictorios.
+
+Corrección: mantener solo `videoUrl` para `MessageType.VIDEO` y cubrirlo con test de serialización/renderizado.
+
+[MEDIO] Room pierde campos relevantes de mensajes y chats
+Archivos: MessageEntity.kt:10-114, ChatEntity.kt:8-88
+
+No se conservan en Room `replyToMessageId`, `replyToText`, `replyToSender`, `reactions`, `userReaction`, `pollData`, `locationData`, `expirationTimestamp`, `topicId`, `isPinned`, `isAnonymous`, `userBadge`, `voiceWaveform` ni varios campos de Chat. Al volver a offline o restaurar, se pierde comportamiento tipo WhatsApp/Telegram.
+
+Corrección: ampliar entidades/converters/migraciones y probar round-trip completo.
+
+[MEDIO] Restore de backup pierde datos y puede fallar con números Firestore
+Archivos: FirebaseChatRepository.kt:953-1035
+
+La restauración reconstruye solo un subconjunto de campos y hace casts rígidos a `Long`. Firestore puede entregar números como `Long`, `Double` u otros tipos según el origen. El backup además se guarda en un único documento, sin paginación, versionado ni cifrado.
+
+Corrección: backup por chunks versionados, validación de esquema, conversores numéricos tolerantes, idempotencia y cifrado/manifest de integridad.
+
+[MEDIO] Estados tienen privacidad solo en cliente y Storage permisivo
+Archivos: FirebaseChatRepository.kt:1436-1456, storage.rules:36-52
+
+`observeActiveStatuses` filtra privacidad después de descargar hasta 100 estados. Las reglas de Storage permiten lectura global de estados autenticados y la ruta legacy permite crear/borrar sin validar propietario. Un cliente puede leer media aunque la UI la filtre.
+
+Corrección: imponer audiencia en servidor o cambiar la arquitectura para no exponer objetos no autorizados; eliminar ruta legacy permisiva.
+
+[MEDIO] Reacciones/vistas de estados tienen carreras y falta autorización explícita
+Archivos: FirebaseChatRepository.kt:1467-1494
+
+Las vistas hacen get + arrayUnion y las reacciones actualizan directamente un mapa. No se ve una validación de audiencia en el método; con reglas abiertas cualquier usuario puede alterar reacciones/vistas de cualquier estado.
+
+Corrección: transacciones/subcolecciones por UID y reglas que exijan audiencia, autenticación y un único view por usuario.
+
+[MEDIO] No hay wrapper Gradle ni pruebas de reglas
+Raíz del repositorio y firebase.json
+
+No existe `gradlew` ni `gradle-wrapper.jar`; tampoco se observan tests de Firebase Emulator para reglas. No fue posible compilar Android en este entorno porque tampoco hay Gradle global.
+
+Corrección: añadir wrapper reproducible, tarea CI, tests unitarios de converters y suite de reglas con Emulator Suite.
+
+======================================================================
+4. ORDEN DE BLOQUEO PARA EL SIGUIENTE PARCHE
+======================================================================
+
+1. No desplegar: corregir firestore.rules y Storage Rules.
+2. Migrar a Firebase Auth; retirar hashes manuales y privilegios derivados de SharedPreferences.
+3. Retirar cualquier texto E2E falso o implementar cifrado real.
+4. Corregir sendMessage/syncMessage con await, Result y outbox.
+5. Corregir borrado para mí, ver una vez, reacciones y encuestas.
+6. Eliminar contacto ficticio y corregir fallback de audio local.
+7. Añadir FCM y, si se necesita, WebRTC real; de lo contrario ocultar botones simulados.
+8. Completar Room/backup y cubrir reglas con Emulator.
+
+======================================================================
+5. CONCLUSIÓN
+======================================================================
+
+En el estado observado, la aplicación no está lista para comportarse como un mensajero tipo WhatsApp/Telegram en producción. Los problemas no son solo cosméticos: hay autorización global, identidad no confiable, estados de entrega falsos, datos que reaparecen tras borrado local, encuestas/reacciones inconsistentes, llamadas simuladas y notificaciones ausentes en background.
+
+Para una nueva verificación es necesario que los parches estén disponibles en este mismo entorno, en una rama/commit accesible, o que se proporcione el commit exacto después de hacer push. El archivo anterior de prompts sigue siendo válido como guía; este informe añade los errores lógicos detectados en la revisión actual.

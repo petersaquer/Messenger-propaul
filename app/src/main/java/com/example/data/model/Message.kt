@@ -66,6 +66,7 @@ data class Message(
     val gifUrl: String? = null,
     val stickerEmoji: String? = null,
     val reactions: Map<String, Int> = emptyMap(),
+    val reactionsByUser: Map<String, String> = emptyMap(),
     val userReaction: String? = null,
     val topicId: String? = null,
     val isPinned: Boolean = false,

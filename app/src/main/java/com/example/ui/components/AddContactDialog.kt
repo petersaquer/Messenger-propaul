@@ -231,7 +231,7 @@ fun AddContactDialog(
                             }
                         }
                     } else {
-                        // Not in Firebase -> E2EE Encrypted Chat
+                        // Not in Firebase -> Local Private Chat
                         Card(
                             colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
                             shape = RoundedCornerShape(12.dp),
@@ -248,7 +248,7 @@ fun AddContactDialog(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "Cifrado de Extremo a Extremo (E2EE)",
+                                        text = "Chat Privado Local (Sin Nube)",
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp,
                                         color = Color(0xFFE65100)
@@ -256,14 +256,14 @@ fun AddContactDialog(
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "Este contacto no tiene una cuenta pública registrada. Se iniciará una conversación con cifrado seguro en tu dispositivo.",
+                                    text = "Este contacto no tiene una cuenta pública registrada en el servidor. Se iniciará una conversación privada guardada únicamente en este dispositivo.",
                                     fontSize = 12.sp,
                                     color = Color(0xFF5D4037),
                                     lineHeight = 16.sp
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "Huella de clave E2EE: SHA-256 #D4A8-E19C-33F2",
+                                    text = "Identificador de sesión: #D4A8-E19C-33F2",
                                     fontSize = 10.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = Color(0xFFE65100),

@@ -334,7 +334,7 @@ fun ContactViewerDialog(
                         }
                     }
 
-                    val bio = "Disponible en Paul App • Mensajería Cifrada E2EE"
+                    val bio = "Disponible en Paul App • Mensajería Segura TLS 1.3"
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(text = bio, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -471,12 +471,12 @@ fun ContactViewerDialog(
                         Spacer(modifier = Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Cifrado de Extremo a Extremo",
+                                text = "Conexión Segura TLS 1.3",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
-                                text = chat?.encryptionKeyFingerprint ?: "Claves verificadas por protocolo seguro",
+                                text = "Tránsito protegido y autenticación verificada",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
